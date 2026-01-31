@@ -16,6 +16,8 @@ local guardsTeam = Teams:FindFirstChild("Guards")
 local inmatesTeam = Teams:FindFirstChild("Inmates")
 local criminalsTeam = Teams:FindFirstChild("Criminals")
 
+
+
 local cfg = {
 	enabled = true,
 	teamcheck = false,
@@ -78,6 +80,31 @@ local cfg = {
 	c4espmaxdist = 200,
 	c4espshowdist = true
 }
+
+-- DEBUG SYSTEM
+local debugMode = true
+local debugLogs = {}
+
+local function debugPrint(msg)
+    if debugMode then
+        table.insert(debugLogs, msg)
+        print("[DEBUG] " .. msg)
+    end
+end
+
+local function showDebugNotification()
+    if #debugLogs > 0 then
+        local lastFive = ""
+        for i = math.max(1, #debugLogs - 4), #debugLogs do
+            lastFive = lastFive .. debugLogs[i] .. "\n"
+        end
+        StarterGui:SetCore("SendNotification", {
+            Title = "Debug Info",
+            Text = lastFive,
+            Duration = 5
+        })
+    end
+end
 
 local wallParams = RaycastParams.new()
 wallParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -449,36 +476,232 @@ end
 
 -- FUNÇÃO AUTO SHOOT CORRIGIDA
 local function autoShoot()
-    if not cfg.autoshoot or not cfg.enabled or not currentGun then return end
-
-    local now = os.clock()
-    local fireRate = currentGun:GetAttribute("FireRate") or cfg.autoshootdelay
-    if now - lastAutoShoot < fireRate then return end
-
-    local myChar = LocalPlayer.Character
-    if not myChar then return end
-    local myHead = myChar:FindFirstChild("Head")
-    if not myHead then return end
-
-    local muzzle = currentGun:FindFirstChild("Muzzle")
-    local startPos = muzzle and muzzle.Position or myHead.Position
-
-    -- CORREÇÃO: Verificação melhorada do target
-    local target, targetPos = getClosest(cfg.fov)
-    if not target or not target.Character or not fullCheck(target) then 
-        lastAutoTarget = nil
+    debugPrint("=== AUTO SHOOT STARTED ===")
+    
+    if not cfg.autoshoot then 
+        debugPrint("Auto shoot disabled in config")
+        return 
+    end
+    if not cfg.enabled then 
+        debugPrint("Silent aim disabled")
+        return 
+    end
+    if not currentGun then 
+        debugPrint("No current gun")
         return 
     end
 
+    local now = os.clock()
+    local fireRate = currentGun:GetAttribute("FireRate") or cfg.autoshootdelay
+    debugPrint("Fire rate: " .. tostring(fireRate))
+    
+    if now - lastAutoShoot < fireRate then 
+        debugPrint("On cooldown: " .. tostring(now - lastAutoShoot) .. " < " .. tostring(fireRate))
+        return 
+    end
+
+    local myChar = LocalPlayer.Character
+    if not myChar then 
+        debugPrint("No character")
+        return 
+    end
+    
+    local myHead = myChar:FindFirstChild("Head")
+    if not myHead then 
+        debugPrint("No head part")
+        return 
+    end
+
+    debugPrint("Looking for target...")
+    local target, targetPos = getClosest(cfg.fov)
+    
+    if not target then 
+        debugPrint("No target found")
+        lastAutoTarget = nil
+        return 
+    end
+    
+    if not target.Character then
+        debugPrint("Target has no character")
+        return
+    end
+    
+    if not fullCheck(target) then 
+        debugPrint("Target failed full check")
+        return 
+    end
+
+    debugPrint("Target found: " .. target.Name)
+    
     if target ~= lastAutoTarget then
         targetAcquiredTime = now
         lastAutoTarget = target
+        debugPrint("New target acquired")
     end
 
-    if now - targetAcquiredTime < cfg.autoshootstartdelay then return end
+    if now - targetAcquiredTime < cfg.autoshootstartdelay then 
+        debugPrint("Waiting start delay: " .. tostring(now - targetAcquiredTime))
+        return 
+    end
 
     local targetPart = getTargetPart(target.Character)
-    if not targetPart then return end
+    if not targetPart then 
+        debugPrint("No target part found")
+        return 
+    end
+    debugPrint("Target part: " .. targetPart.Name)
+
+    local ammo = currentGun:GetAttribute("Local_CurrentAmmo") or currentGun:GetAttribute("CurrentAmmo") or 0
+    debugPrint("Ammo: " .. tostring(ammo))
+    
+    if ammo <= 0 then 
+        debugPrint("Out of ammo")
+        if cfg.autoreload then
+            local reloadEvent = currentGun:FindFirstChild("Reload")
+            if reloadEvent then
+                reloadEvent:FireServer()
+                debugPrint("Auto reload triggered")
+            end
+        end
+        return 
+    end
+
+    lastAutoShoot = now
+    debugPrint("Last auto shoot time updated")
+
+    local isTaser = currentGun:GetAttribute("Projectile") == "Taser"
+    local isShotgun = currentGun:GetAttribute("IsShotgun")
+    local shouldHit = false
+
+    if cfg.taseralwayshit and isTaser then
+        shouldHit = true
+        debugPrint("Taser always hit enabled")
+    elseif cfg.ifplayerstill and isStanding(target) then
+        shouldHit = true
+        debugPrint("Target is standing still")
+    elseif cfg.hitchanceAutoOnly and isShotgun then
+        shouldHit = true
+        debugPrint("Shotgun always hit")
+    else
+        shouldHit = rollHit()
+        debugPrint("Hit chance roll: " .. tostring(shouldHit))
+    end
+
+    if not shouldHit and cfg.missspread <= 0 then
+        debugPrint("Miss with no spread - canceling")
+        return
+    end
+
+    local projectileCount = currentGun:GetAttribute("ProjectileCount") or 1
+    debugPrint("Projectile count: " .. tostring(projectileCount))
+    
+    local shots = {}
+
+    for i = 1, projectileCount do
+        local finalPos
+        if shouldHit then
+            if targetPos then
+                finalPos = targetPos
+            else
+                finalPos = targetPart.Position
+            end
+        else
+            if cfg.missspread > 0 then
+                finalPos = getMissPos(targetPart.Position)
+            else
+                return
+            end
+        end
+        shots[i] = {myHead.Position, finalPos, shouldHit and targetPart or nil}
+        createBulletTrail(myHead.Position, finalPos, isTaser)
+    end
+
+    debugPrint("Attempting to fire " .. #shots .. " shots")
+    
+    -- Tentativa 1: ShootEvent principal
+    local shotFired = false
+    if ShootEvent then
+        local success, errorMsg = pcall(function()
+            ShootEvent:FireServer(shots)
+        end)
+        
+        if success then
+            shotFired = true
+            debugPrint("ShootEvent fired successfully")
+        else
+            debugPrint("ShootEvent error: " .. tostring(errorMsg))
+        end
+    else
+        debugPrint("ShootEvent not found")
+    end
+    
+    -- Tentativa 2: Evento direto na arma
+    if not shotFired and currentGun then
+        debugPrint("Looking for gun events...")
+        for _, child in pairs(currentGun:GetChildren()) do
+            if child:IsA("RemoteEvent") then
+                debugPrint("Found RemoteEvent: " .. child.Name)
+                if child.Name:find("Shoot") or child.Name:find("Fire") or child.Name == "ShootEvent" then
+                    local success, err = pcall(function()
+                        child:FireServer(shots)
+                    end)
+                    if success then
+                        shotFired = true
+                        debugPrint("Fired via " .. child.Name)
+                        break
+                    else
+                        debugPrint("Error firing via " .. child.Name .. ": " .. tostring(err))
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Tentativa 3: Método alternativo
+    if not shotFired then
+        debugPrint("Trying alternative method...")
+        -- Tenta encontrar qualquer RemoteFunction também
+        for _, child in pairs(currentGun:GetChildren()) do
+            if child:IsA("RemoteFunction") then
+                debugPrint("Found RemoteFunction: " .. child.Name)
+                if child.Name:find("Shoot") or child.Name:find("Fire") then
+                    pcall(function()
+                        child:InvokeServer(shots)
+                        shotFired = true
+                        debugPrint("Invoked via " .. child.Name)
+                    end)
+                end
+            end
+        end
+    end
+
+    if shotFired then
+        debugPrint("SHOT FIRED SUCCESSFULLY!")
+        
+        -- Atualiza munição
+        local newAmmo = ammo - 1
+        currentGun:SetAttribute("Local_CurrentAmmo", newAmmo)
+        debugPrint("New ammo: " .. tostring(newAmmo))
+        
+        -- Feedback
+        if cfg.autoshootfeedback then
+            spawn(function()
+                if currentGun and currentGun:FindFirstChild("Handle") then
+                    local handle = currentGun.Handle
+                    local original = handle.Transparency
+                    handle.Transparency = 0.5
+                    wait(0.05)
+                    handle.Transparency = original
+                end
+            end)
+        end
+    else
+        debugPrint("FAILED TO FIRE SHOT")
+        showDebugNotification()
+    end
+
+    debugPrint("=== AUTO SHOOT ENDED ===")
+end
 
     -- Verifica munição
     local ammo = currentGun:GetAttribute("Local_CurrentAmmo") or currentGun:GetAttribute("CurrentAmmo") or 0
