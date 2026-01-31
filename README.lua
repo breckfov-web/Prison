@@ -1369,7 +1369,13 @@ local sections = {
 	espLeft = ESPTab:Section({ Side = "Left" }),
 	espRight = ESPTab:Section({ Side = "Right" }),
 	autoshootLeft = AutoshootTab:Section({ Side = "Left" }),
-	autoshootRight = AutoshootTab:Section({ Side = "Right" }),
+	-- Na seção autoshootRight adiicone:
+sections.autoshootRight:Button({
+    Name = "Show Debug Info",
+    Callback = function()
+        showDebugNotification()
+    end,
+})
 	settingsLeft = SettingsTab:Section({ Side = "Left" }),
 	settingsRight = SettingsTab:Section({ Side = "Right" })
 }
